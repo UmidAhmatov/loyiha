@@ -10,10 +10,13 @@
 #   ./setup.sh --no-ollama          # Ollama o'rnatmaslik (masalan, bulutli API kaliti bilan ishlash uchun)
 #   ./setup.sh --no-rust            # Rust kengaytmasini qurmaslik (xotira funksiyalari o'chadi)
 #   ./setup.sh --dev                # dasturchi paketlari (pytest, ruff, pre-commit)
+#   ./setup.sh --elevenlabs         # ElevenLabs ovozi (API kaliti yashirin holda so'raladi)
 #
 # Muhit o'zgaruvchilari:
 #   OPENJARVIS_DIR       Kod qayerga klonlanadi (standart: shu skript yonidagi ./OpenJarvis)
 #   OPENJARVIS_REPO_URL  Repo manzili (standart: https://github.com/open-jarvis/OpenJarvis.git)
+#   ELEVENLABS_API_KEY   Berilsa, kalit so'ralmaydi (--elevenlabs bilan)
+#   ELEVENLABS_VOICE_ID  ElevenLabs ovozi (standart: George)
 
 set -euo pipefail
 
@@ -24,8 +27,9 @@ MODEL="qwen3.5:2b"
 WITH_OLLAMA=1
 WITH_RUST=1
 WITH_DEV=0
+WITH_ELEVENLABS=0
 
-usage() { sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -33,6 +37,7 @@ while [[ $# -gt 0 ]]; do
         --no-ollama) WITH_OLLAMA=0 ;;
         --no-rust) WITH_RUST=0 ;;
         --dev) WITH_DEV=1 ;;
+        --elevenlabs) WITH_ELEVENLABS=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Noma'lum parametr: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -88,6 +93,18 @@ extras=(--extra server)
 if [[ "$WITH_DEV" -eq 1 || "$WITH_RUST" -eq 1 ]]; then
     extras+=(--extra dev)
 fi
+# ElevenLabs avval sozlangan bo'lsa, flagsiz qayta ishga tushirishda ham saqlanadi
+# (`uv sync` ro'yxatda yo'q paketlarni o'chiradi). Yo'l Python'dagi bilan bir xil tartibda.
+if [[ -n "${OPENJARVIS_HOME:-}" ]]; then
+    oj_home_guess="$OPENJARVIS_HOME"
+elif [[ -n "${XDG_DATA_HOME:-}" ]]; then
+    oj_home_guess="$XDG_DATA_HOME/openjarvis"
+else
+    oj_home_guess="$HOME/.openjarvis"
+fi
+[[ -f "$oj_home_guess/elevenlabs.env" ]] && WITH_ELEVENLABS=1
+# speech: mikrofon (faster-whisper) va karnay (sounddevice) — `jarvis chat --voice` uchun
+[[ "$WITH_ELEVENLABS" -eq 1 ]] && extras+=(--extra speech)
 info "Python paketlari o'rnatilmoqda (uv sync ${extras[*]})..."
 uv sync "${extras[@]}"
 ok "Python paketlari o'rnatildi: $(uv run jarvis --version)"
@@ -168,7 +185,45 @@ else
         --prefer-cloud-when-available
 fi
 
-# 7. Grafik interfeys (`jarvis gui`) uchun Node.js/npm — ixtiyoriy, faqat ogohlantiramiz
+# 7. ElevenLabs ovozi (OpenJarvis'da yo'q — voice/ dagi qo'shimcha modul orqali)
+EL_READY=0
+if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
+    info "ElevenLabs ovozi sozlanmoqda..."
+    site="$(uv run python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+    cp "$SCRIPT_DIR/voice/openjarvis_elevenlabs.py" "$SCRIPT_DIR/voice/openjarvis_elevenlabs_hook.py" "$site/"
+    echo "import openjarvis_elevenlabs_hook" > "$site/openjarvis_elevenlabs.pth"
+    el() { uv run python -m openjarvis_elevenlabs "$@"; }
+
+    if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
+        printf '%s' "$ELEVENLABS_API_KEY" | el save-key
+    elif [[ ! -f "$OJ_HOME/elevenlabs.env" ]]; then
+        if [[ -t 0 ]]; then
+            el_key=""
+            read -rsp "ElevenLabs API kaliti (yozganingiz ekranda ko'rinmaydi): " el_key || true
+            echo
+            printf '%s' "$el_key" | el save-key || warn "Kalit saqlanmadi. Keyinroq: ./voice.sh key"
+            unset el_key
+        else
+            warn "Kalit kiritilmadi (terminal yo'q). Keyinroq: ./voice.sh key"
+        fi
+    fi
+    el configure "${ELEVENLABS_VOICE_ID:-}"
+
+    if ! uv run python -c "import sounddevice" >/dev/null 2>&1; then
+        warn "Mikrofon/karnay uchun PortAudio kerak. Ubuntu: sudo apt install -y libportaudio2"
+    fi
+    if [[ -f "$OJ_HOME/elevenlabs.env" || -n "${ELEVENLABS_API_KEY:-}" ]]; then
+        # Qisqa namuna (~40 belgi ElevenLabs limitidan ketadi) — kalit ishlashini tekshiradi
+        if el_out="$(el test 2>&1)"; then
+            EL_READY=1
+            ok "ElevenLabs ishlayapti. $el_out"
+        else
+            warn "ElevenLabs sinovi o'tmadi: $el_out"
+        fi
+    fi
+fi
+
+# 8. Grafik interfeys (`jarvis gui`) uchun Node.js/npm — ixtiyoriy, faqat ogohlantiramiz
 # version_ge A B — A >= B bo'lsa 0 qaytaradi (macOS'ning eski `sort` ida -V yo'q)
 version_ge() {
     local IFS=. i x y
@@ -197,7 +252,7 @@ else
     warn "Node.js topilmadi — GUI ishlamaydi (terminal rejimi ishlaydi). O'rnatish: https://nodejs.org (22.22+)"
 fi
 
-# 8. Tekshiruv
+# 9. Tekshiruv
 info "jarvis doctor ishga tushirilmoqda..."
 uv run jarvis doctor || true
 
@@ -212,6 +267,11 @@ else
     echo "  $SCRIPT_DIR/jarvis.sh gui          # grafik interfeys (avval yuqoridagi Node.js/npm ogohlantirishini hal qiling)"
 fi
 echo "  $SCRIPT_DIR/jarvis.sh ask \"Salom!\" # bitta savol"
+if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
+    echo "  $SCRIPT_DIR/jarvis.sh chat --voice # ovozli suhbat (ElevenLabs)"
+    echo "  $SCRIPT_DIR/voice.sh voices        # ElevenLabs ovozlari ro'yxati"
+    [[ "$EL_READY" -eq 1 ]] || warn "ElevenLabs hali ishlamayapti — ./voice.sh key va ./voice.sh test"
+fi
 if [[ "$WITH_OLLAMA" -eq 1 && "$MODEL_READY" -ne 1 ]]; then
     echo
     warn "Model hali yuklanmagan — suhbatdan oldin: ollama pull $MODEL"

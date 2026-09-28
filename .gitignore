@@ -1,2 +1,4 @@
 # setup.sh klonlaydigan OpenJarvis kodi (o'z git reposi bor)
 /OpenJarvis/
+
+__pycache__/

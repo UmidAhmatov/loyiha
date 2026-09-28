@@ -11,6 +11,8 @@ Bu repoda OpenJarvis'ni o'rnatish uchun tayyor skriptlar bor:
 |---|---|
 | [`setup.sh`](setup.sh) | OpenJarvis'ni to'liq o'rnatadi: uv, Python paketlar, Rust kengaytmasi, Ollama, model, konfiguratsiya |
 | [`jarvis.sh`](jarvis.sh) | O'rnatilgan OpenJarvis'ni ishga tushiradi (kerak bo'lsa Ollama'ni ham) |
+| [`voice.sh`](voice.sh) | ElevenLabs ovozini boshqaradi: kalit, ovoz tanlash, sinov |
+| [`voice/`](voice/) | OpenJarvis uchun ElevenLabs ovoz moduli (OpenJarvis'da ElevenLabs yo'q) |
 
 ---
 
@@ -70,6 +72,7 @@ Qo'shimcha parametrlar:
 ./setup.sh --no-ollama          # Ollama'siz (faqat bulutli API bilan ishlash uchun)
 ./setup.sh --no-rust            # Rust kengaytmasisiz (tezroq, lekin xotira funksiyalari o'chadi)
 ./setup.sh --dev                # dasturchilar uchun: pytest, ruff, pre-commit
+./setup.sh --elevenlabs         # ElevenLabs ovozi (5-bo'limga qarang)
 ```
 
 Skriptni istalgancha qayta ishga tushirish mumkin: u kodni yangilaydi (`git pull`)
@@ -188,7 +191,64 @@ Keyinroq o'tish uchun: `./jarvis.sh init --force` (konfiguratsiyani qayta yarata
 
 ---
 
-## 5. Muammolarni hal qilish
+## 5. Ovoz (ElevenLabs)
+
+OpenJarvis'ning o'zida ElevenLabs yo'q (faqat Kokoro, OpenAI va Cartesia bor).
+Shu repodagi [`voice/`](voice/) moduli uni `elevenlabs` nomi bilan qo'shadi:
+OpenJarvis kodiga tegilmaydi, shuning uchun yangilanishlardan keyin ham ishlaydi.
+
+### Sozlash
+
+```bash
+./setup.sh --elevenlabs
+```
+
+Skript API kalitini **yashirin** holda so'raydi: yozganingiz ekranda ko'rinmaydi va
+buyruqlar tarixiga tushmaydi. Kalitni [elevenlabs.io](https://elevenlabs.io) saytida
+(Settings → API Keys) yaratasiz. Keyin skript:
+
+- kalitni `~/.openjarvis/elevenlabs.env` ga yozadi (faqat sizga o'qish huquqi, `chmod 600`);
+- `config.toml` da `[speech] tts_backend = "elevenlabs"` qiladi (standart ovoz: George);
+- mikrofon va karnay uchun paketlarni o'rnatadi;
+- qisqa namuna yaratib, kalit ishlashini tekshiradi.
+
+> **Kalit — parol kabi.** Uni chatga, repoga yoki skrinshotga qo'ymang. Tasodifan
+> ko'rinib qolsa, ElevenLabs sahifasida o'chirib, yangisini yarating va
+> `./voice.sh key` bilan almashtiring.
+
+Keyingi `./setup.sh` ishga tushirishlarida ElevenLabs sozlamasi saqlanib qoladi.
+
+### Ishlatish
+
+```bash
+./jarvis.sh chat --voice        # ovozli suhbat: mikrofon orqali gapirasiz, Jarvis ElevenLabs ovozida javob beradi
+./jarvis.sh gui                 # grafik interfeysdagi ovoz ham ElevenLabs'dan foydalanadi
+./voice.sh voices               # akkauntingizdagi ovozlar (ID va nomi)
+./voice.sh voice <ID>           # Jarvis ovozini almashtirish
+./voice.sh test "Salom!"        # namuna: ~/.openjarvis/elevenlabs-test.mp3
+./voice.sh key                  # kalitni almashtirish
+```
+
+Qo'shimcha sozlamalar (`~/.openjarvis/elevenlabs.env` ga qator qo'shing):
+
+```bash
+ELEVENLABS_MODEL=eleven_multilingual_v2    # standart; boshqa model tanlash mumkin
+ELEVENLABS_API_BASE=https://api.eu.residency.elevenlabs.io   # faqat EU hududidagi akkauntlar uchun
+```
+
+Eslatmalar:
+
+- Har bir javob ElevenLabs tarifingizdagi belgilar limitidan sarflanadi (sinov namunasi ≈40 belgi).
+- Qaysi model qaysi tillarni qo'llashini (jumladan, o'zbek tilini)
+  [ElevenLabs hujjatlarida](https://elevenlabs.io/docs) tekshiring.
+- Mikrofondagi gapni kompyuterning o'zidagi Whisper matnga aylantiradi (birinchi
+  ishlatishda model yuklab olinadi). Aniqroq tanish uchun `config.toml` da
+  `[speech]` bo'limiga `model = "small"` qo'shing.
+- Linux'da mikrofon/karnay uchun: `sudo apt install -y libportaudio2`.
+
+---
+
+## 6. Muammolarni hal qilish
 
 | Belgi | Yechim |
 |---|---|
@@ -198,6 +258,10 @@ Keyinroq o'tish uchun: `./jarvis.sh init --force` (konfiguratsiyani qayta yarata
 | Rust kengaytmasi qurilmadi | Ubuntu: `sudo apt install -y build-essential`, macOS: `xcode-select --install`, so'ng `./setup.sh` ni qayta ishga tushiring |
 | `memory features unavailable` | Rust kengaytmasi yo'q — yuqoridagi qatorga qarang |
 | Javob juda sekin | Kichikroq model tanlang (`qwen3.5:2b`) yoki bulutli modelga o'ting |
+| `ElevenLabs xatosi 401: Invalid API key` | Kalit noto'g'ri yoki o'chirilgan: `./voice.sh key` |
+| Xato xabarida `quota` so'zi bor | ElevenLabs belgilar limiti tugagan — tarifingizni tekshiring |
+| `ElevenLabs xatosi 429` | Bir vaqtda juda ko'p so'rov — biroz kutib qayta urining |
+| `PortAudio library not found` | `sudo apt install -y libportaudio2` |
 
 Har qanday holatda birinchi qadam: `./jarvis.sh doctor`.
 
@@ -213,7 +277,7 @@ enabled = false
 
 ---
 
-## 6. Yangilash va o'chirish
+## 7. Yangilash va o'chirish
 
 **Yangilash:**
 
@@ -226,6 +290,8 @@ enabled = false
 ```bash
 rm -rf OpenJarvis ~/.openjarvis
 ```
+
+(`~/.openjarvis` bilan birga ElevenLabs kaliti fayli ham o'chadi.)
 
 Ollama va uv o'z joyida qoladi (ular boshqa dasturlar uchun ham kerak bo'lishi mumkin).
 Modellarni o'chirish: `ollama rm qwen3.5:2b`.
@@ -242,6 +308,12 @@ Skriptlar toza Linux muhitida (Python 3.11, Node.js 22.22, uv 0.8) sinab ko'rild
 - `jarvis.sh gui` — grafik interfeys `http://127.0.0.1:5173` da ochildi (npm 11 bilan);
 - OpenJarvis testlari: 8907 ta o'tdi; 3 tasi internet cheklovi tufayli o'tmadi
   (sinov muhitida tashqi saytlar yopiq edi).
+
+ElevenLabs moduli: 14 ta test (`uv run --project OpenJarvis pytest voice/`), hamda
+soxta ElevenLabs serveri bilan to'liq zanjir tekshirildi: `setup.sh --elevenlabs`,
+`voice.sh` buyruqlari, `jarvis serve` ning `/v1/speech/synthesize` endpointi (GUI shu
+orqali gapiradi) ElevenLabs'dan to'g'ri WAV qaytardi. Haqiqiy ElevenLabs API bilan
+sinalmagan: `api.elevenlabs.io` sinov muhitida yopiq edi.
 
 Sinov muhitida `ollama.com` va `huggingface.co` yopiq edi, shuning uchun Ollama'ni
 haqiqatda yuklab olish va model bilan suhbat u yerda sinalmagan. Skriptlarning
