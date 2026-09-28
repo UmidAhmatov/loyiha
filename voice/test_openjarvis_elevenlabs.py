@@ -23,6 +23,7 @@ import openjarvis_elevenlabs as el
 
 TTS_URL = f"{el.API_BASE}/v1/text-to-speech/{el.DEFAULT_VOICE}"
 VOICE_DIR = str(Path(__file__).parent)
+ADDONS_DIR = str(Path(__file__).parent.parent / "addons")
 
 
 @pytest.fixture(autouse=True)
@@ -207,28 +208,25 @@ def test_registered_backend_used_by_discovery_and_tool(monkeypatch, tmp_path):
     assert next(tmp_path.glob("*.mp3")).read_bytes() == b"ID3mp3"
 
 
-def _run_python(code: str, **env: str) -> str:
-    full_env = {**os.environ, "PYTHONPATH": VOICE_DIR, **env}
+def test_hook_registers_on_speech_import(_isolated_home):
+    # setup.sh yozadigan .pth qatori bilan bir xil
+    code = (
+        "import openjarvis_addon_hook; "
+        "openjarvis_addon_hook.after_import('openjarvis.speech', 'openjarvis_elevenlabs')\n"
+        "from openjarvis.speech._tts_discovery import get_tts_backend\n"
+        "print(get_tts_backend('elevenlabs').backend_id)\n"
+    )
+    env = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join([VOICE_DIR, ADDONS_DIR]),
+        "ELEVENLABS_API_KEY": "k",
+        "OPENJARVIS_HOME": str(_isolated_home),
+    }
     out = subprocess.run(
         [sys.executable, "-c", code],
-        env=full_env,
+        env=env,
         capture_output=True,
         text=True,
         check=True,
     )
-    return out.stdout.strip()
-
-
-def test_hook_is_lazy():
-    code = "import openjarvis_elevenlabs_hook, sys; print('openjarvis' in sys.modules)"
-    assert _run_python(code) == "False"
-
-
-def test_hook_registers_on_speech_import(_isolated_home):
-    code = (
-        "import openjarvis_elevenlabs_hook\n"
-        "from openjarvis.speech._tts_discovery import get_tts_backend\n"
-        "print(get_tts_backend('elevenlabs').backend_id)\n"
-    )
-    out = _run_python(code, ELEVENLABS_API_KEY="k", OPENJARVIS_HOME=str(_isolated_home))
-    assert out == "elevenlabs"
+    assert out.stdout.strip() == "elevenlabs"

@@ -13,6 +13,8 @@ Bu repoda OpenJarvis'ni o'rnatish uchun tayyor skriptlar bor:
 | [`jarvis.sh`](jarvis.sh) | O'rnatilgan OpenJarvis'ni ishga tushiradi (kerak bo'lsa Ollama'ni ham) |
 | [`voice.sh`](voice.sh) | ElevenLabs ovozini boshqaradi: kalit, ovoz tanlash, sinov |
 | [`voice/`](voice/) | OpenJarvis uchun ElevenLabs ovoz moduli (OpenJarvis'da ElevenLabs yo'q) |
+| [`onec.sh`](onec.sh), [`onec/`](onec/) | 1C: выручка через OData — команда и инструмент для Jarvis |
+| [`addons/`](addons/) | Qo'shimcha modullarni OpenJarvis'ga ulaydigan umumiy hook |
 
 ---
 
@@ -73,6 +75,7 @@ Qo'shimcha parametrlar:
 ./setup.sh --no-rust            # Rust kengaytmasisiz (tezroq, lekin xotira funksiyalari o'chadi)
 ./setup.sh --dev                # dasturchilar uchun: pytest, ruff, pre-commit
 ./setup.sh --elevenlabs         # ElevenLabs ovozi (5-bo'limga qarang)
+./setup.sh --onec               # 1C: выручка (раздел 6)
 ```
 
 Skriptni istalgancha qayta ishga tushirish mumkin: u kodni yangilaydi (`git pull`)
@@ -248,7 +251,73 @@ Eslatmalar:
 
 ---
 
-## 6. Muammolarni hal qilish
+## 6. 1C: выручка
+
+В OpenJarvis нет подключения к 1C, поэтому модуль [`onec/`](onec/) добавляет
+инструмент `onec_revenue`. Он читает проведённые документы реализации через
+стандартный интерфейс OData и **сам считает суммы**. Модель получает готовые цифры
+и ничего не складывает, поэтому числа точные.
+
+### Что нужно в 1C
+
+1. База опубликована на веб-сервере (Apache или IIS) с включённым OData. Адрес вида
+   `http://сервер/база/odata/standard.odata`.
+2. В состав стандартного интерфейса OData включены документ реализации и справочник
+   контрагентов. Это делает администратор 1C, например обработкой «Настройка
+   автоматического REST-сервиса» или методом `УстановитьСоставСтандартногоИнтерфейсаOData`.
+3. Отдельный пользователь 1C с правами **только на чтение**. Не используйте
+   администратора.
+
+Проверить вручную: откройте в браузере
+`http://сервер/база/odata/standard.odata/Document_РеализацияТоваровУслуг?$top=1&$format=json`
+— после ввода логина должен появиться JSON.
+
+### Подключение
+
+```bash
+./setup.sh --onec
+```
+
+Скрипт спросит адрес OData, пользователя и пароль (пароль на экране не отображается).
+Данные сохраняются в `~/.openjarvis/onec.env` с правами `600` и никуда не
+отправляются. Затем скрипт проверяет подключение.
+
+### Использование
+
+```bash
+./onec.sh revenue                                           # текущий месяц
+./onec.sh revenue 01.09.2026 30.09.2026                     # период
+./onec.sh revenue 01.09.2026 30.09.2026 --by counterparty   # по контрагентам (также month, day)
+./onec.sh ask "Какая выручка за сентябрь и кто главный клиент?"   # вопрос Jarvis
+./onec.sh login                                             # сменить адрес/пользователя/пароль
+```
+
+`./onec.sh revenue` не использует модель и всегда даёт точный ответ. `./onec.sh ask`
+передаёт вопрос агенту Jarvis с инструментом `onec_revenue`. Маленькая локальная
+модель (`qwen3.5:2b`) вызывает инструменты ненадёжно, поэтому для таких вопросов
+лучше подойдёт модель покрупнее (`qwen3.5:9b`) или облачная.
+
+### Настройки для вашей конфигурации
+
+Добавьте строки в `~/.openjarvis/onec.env`:
+
+| Настройка | По умолчанию | Когда менять |
+|---|---|---|
+| `ONEC_SALES_DOCUMENT` | `Document_РеализацияТоваровУслуг` | УНФ: `Document_РасходнаяНакладная` |
+| `ONEC_AMOUNT_FIELD` | `СуммаДокумента` | если сумма хранится в другом реквизите |
+| `ONEC_RETURN_DOCUMENT` | (пусто) | вычитать возвраты: `Document_ВозвратТоваровОтПокупателя` |
+| `ONEC_COUNTERPARTY_FIELD` / `ONEC_COUNTERPARTY_CATALOG` | `Контрагент` / `Catalog_Контрагенты` | другая конфигурация |
+| `ONEC_CA_BUNDLE` | (пусто) | https с сертификатом собственного центра |
+
+Важно:
+- Выручка — это сумма документов реализации, обычно **с НДС**. Это не бухгалтерский
+  отчёт: корректировки и ручные операции не учитываются.
+- Если 1C доступна по `http://` (без `s`), пароль идёт по сети открытым текстом.
+  Для доступа не из локальной сети используйте `https://`.
+
+---
+
+## 7. Muammolarni hal qilish
 
 | Belgi | Yechim |
 |---|---|
@@ -262,6 +331,9 @@ Eslatmalar:
 | Xato xabarida `quota` so'zi bor | ElevenLabs belgilar limiti tugagan — tarifingizni tekshiring |
 | `ElevenLabs xatosi 429` | Bir vaqtda juda ko'p so'rov — biroz kutib qayta urining |
 | `PortAudio library not found` | `sudo apt install -y libportaudio2` |
+| `1C отклонила вход` | Неверный пользователь или пароль: `./onec.sh login` |
+| `В OData нет объекта ...` | Документ не включён в состав OData или другое название (раздел 6, настройки) |
+| `1C ответила не JSON` | Адрес должен заканчиваться на `/odata/standard.odata` |
 
 Har qanday holatda birinchi qadam: `./jarvis.sh doctor`.
 
@@ -277,7 +349,7 @@ enabled = false
 
 ---
 
-## 7. Yangilash va o'chirish
+## 8. Yangilash va o'chirish
 
 **Yangilash:**
 
@@ -291,7 +363,7 @@ enabled = false
 rm -rf OpenJarvis ~/.openjarvis
 ```
 
-(`~/.openjarvis` bilan birga ElevenLabs kaliti fayli ham o'chadi.)
+(`~/.openjarvis` bilan birga ElevenLabs kaliti va 1C sozlamalari fayllari ham o'chadi.)
 
 Ollama va uv o'z joyida qoladi (ular boshqa dasturlar uchun ham kerak bo'lishi mumkin).
 Modellarni o'chirish: `ollama rm qwen3.5:2b`.
@@ -309,7 +381,15 @@ Skriptlar toza Linux muhitida (Python 3.11, Node.js 22.22, uv 0.8) sinab ko'rild
 - OpenJarvis testlari: 8907 ta o'tdi; 3 tasi internet cheklovi tufayli o'tmadi
   (sinov muhitida tashqi saytlar yopiq edi).
 
-ElevenLabs moduli: 14 ta test (`uv run --project OpenJarvis pytest voice/`), hamda
+Qo'shimcha modullar testlari: `uv run --project OpenJarvis pytest voice/ onec/ addons/`
+(37 ta test).
+
+Модуль 1C проверен на тестовом сервере OData: `setup.sh --onec` (с вводом пароля в
+терминале), `onec.sh revenue`, `jarvis tool list`. Вся цепочка `onec.sh ask` тоже
+прошла: агент Jarvis вызвал `onec_revenue`, получил сумму из 1C и вернул её в
+ответе. Настоящая база 1C и настоящая модель в тесте не участвовали.
+
+ElevenLabs moduli (`voice/`) soxta ElevenLabs serveri bilan ham
 soxta ElevenLabs serveri bilan to'liq zanjir tekshirildi: `setup.sh --elevenlabs`,
 `voice.sh` buyruqlari, `jarvis serve` ning `/v1/speech/synthesize` endpointi (GUI shu
 orqali gapiradi) ElevenLabs'dan to'g'ri WAV qaytardi. Haqiqiy ElevenLabs API bilan

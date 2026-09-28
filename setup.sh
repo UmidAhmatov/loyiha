@@ -11,6 +11,7 @@
 #   ./setup.sh --no-rust            # Rust kengaytmasini qurmaslik (xotira funksiyalari o'chadi)
 #   ./setup.sh --dev                # dasturchi paketlari (pytest, ruff, pre-commit)
 #   ./setup.sh --elevenlabs         # ElevenLabs ovozi (API kaliti yashirin holda so'raladi)
+#   ./setup.sh --onec               # 1C: выручка через OData (пароль запрашивается скрыто)
 #
 # Muhit o'zgaruvchilari:
 #   OPENJARVIS_DIR       Kod qayerga klonlanadi (standart: shu skript yonidagi ./OpenJarvis)
@@ -28,6 +29,7 @@ WITH_OLLAMA=1
 WITH_RUST=1
 WITH_DEV=0
 WITH_ELEVENLABS=0
+WITH_ONEC=0
 
 usage() { awk 'NR > 1 && /^#/ { sub(/^# ?/, ""); print; next } NR > 1 { exit }' "$0"; }
 
@@ -38,6 +40,7 @@ while [[ $# -gt 0 ]]; do
         --no-rust) WITH_RUST=0 ;;
         --dev) WITH_DEV=1 ;;
         --elevenlabs) WITH_ELEVENLABS=1 ;;
+        --onec) WITH_ONEC=1 ;;
         -h|--help) usage; exit 0 ;;
         *) echo "Noma'lum parametr: $1" >&2; usage >&2; exit 2 ;;
     esac
@@ -103,6 +106,7 @@ else
     oj_home_guess="$HOME/.openjarvis"
 fi
 [[ -f "$oj_home_guess/elevenlabs.env" ]] && WITH_ELEVENLABS=1
+[[ -f "$oj_home_guess/onec.env" ]] && WITH_ONEC=1
 # speech: mikrofon (faster-whisper) va karnay (sounddevice) — `jarvis chat --voice` uchun
 [[ "$WITH_ELEVENLABS" -eq 1 ]] && extras+=(--extra speech)
 info "Python paketlari o'rnatilmoqda (uv sync ${extras[*]})..."
@@ -185,13 +189,23 @@ else
         --prefer-cloud-when-available
 fi
 
+# Qo'shimcha modullar (voice/, onec/) .venv ga nusxalanadi va .pth orqali ulanadi:
+# OpenJarvis'ning maqsad paketi yuklanganda modulning register() chaqiriladi.
+site="$(uv run python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
+rm -f "$site/openjarvis_elevenlabs_hook.py"  # eski versiyadagi alohida hook
+install_addon() {  # install_addon <manba.py> <maqsad paket>
+    local module
+    module="$(basename "$1" .py)"
+    cp "$SCRIPT_DIR/addons/openjarvis_addon_hook.py" "$1" "$site/"
+    printf 'import openjarvis_addon_hook; openjarvis_addon_hook.after_import("%s", "%s")\n' \
+        "$2" "$module" > "$site/$module.pth"
+}
+
 # 7. ElevenLabs ovozi (OpenJarvis'da yo'q — voice/ dagi qo'shimcha modul orqali)
 EL_READY=0
 if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
     info "ElevenLabs ovozi sozlanmoqda..."
-    site="$(uv run python -c 'import sysconfig; print(sysconfig.get_path("purelib"))')"
-    cp "$SCRIPT_DIR/voice/openjarvis_elevenlabs.py" "$SCRIPT_DIR/voice/openjarvis_elevenlabs_hook.py" "$site/"
-    echo "import openjarvis_elevenlabs_hook" > "$site/openjarvis_elevenlabs.pth"
+    install_addon "$SCRIPT_DIR/voice/openjarvis_elevenlabs.py" openjarvis.speech
     el() { uv run python -m openjarvis_elevenlabs "$@"; }
 
     if [[ -n "${ELEVENLABS_API_KEY:-}" ]]; then
@@ -219,6 +233,38 @@ if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
             ok "ElevenLabs ishlayapti. $el_out"
         else
             warn "ElevenLabs sinovi o'tmadi: $el_out"
+        fi
+    fi
+fi
+
+# 7b. 1C — выручка через OData (onec/ — инструмент onec_revenue для агентов Jarvis)
+ONEC_READY=0
+if [[ "$WITH_ONEC" -eq 1 ]]; then
+    info "Подключение 1C..."
+    install_addon "$SCRIPT_DIR/onec/openjarvis_onec.py" openjarvis.tools
+    onec() { uv run python -m openjarvis_onec "$@"; }
+
+    if [[ ! -f "$OJ_HOME/onec.env" ]]; then
+        if [[ -t 0 ]]; then
+            onec_url="" onec_user="" onec_password=""
+            read -rp "Адрес OData 1C (например http://сервер/база/odata/standard.odata): " onec_url || true
+            read -rp "Пользователь 1C: " onec_user || true
+            IFS= read -rsp "Пароль 1C (ввод не отображается): " onec_password || true
+            echo
+            printf '%s\n%s\n%s\n' "$onec_url" "$onec_user" "$onec_password" | onec save-credentials \
+                || warn "Настройки 1C не сохранены. Позже: ./onec.sh login"
+            unset onec_password
+        else
+            warn "Данные 1C не введены (нет терминала). Позже: ./onec.sh login"
+        fi
+    fi
+    onec configure
+    if [[ -f "$OJ_HOME/onec.env" ]]; then
+        if onec_out="$(onec check 2>&1)"; then
+            ONEC_READY=1
+            ok "$onec_out"
+        else
+            warn "Проверка 1C не прошла: $onec_out"
         fi
     fi
 fi
@@ -271,6 +317,11 @@ if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
     echo "  $SCRIPT_DIR/jarvis.sh chat --voice # ovozli suhbat (ElevenLabs)"
     echo "  $SCRIPT_DIR/voice.sh voices        # ElevenLabs ovozlari ro'yxati"
     [[ "$EL_READY" -eq 1 ]] || warn "ElevenLabs hali ishlamayapti — ./voice.sh key va ./voice.sh test"
+fi
+if [[ "$WITH_ONEC" -eq 1 ]]; then
+    echo "  $SCRIPT_DIR/onec.sh revenue          # выручка из 1C за текущий месяц"
+    echo "  $SCRIPT_DIR/onec.sh ask \"Какая выручка за сентябрь?\""
+    [[ "$ONEC_READY" -eq 1 ]] || warn "1C пока не подключена — ./onec.sh login"
 fi
 if [[ "$WITH_OLLAMA" -eq 1 && "$MODEL_READY" -ne 1 ]]; then
     echo
