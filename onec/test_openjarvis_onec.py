@@ -48,12 +48,60 @@ RETURNS = [{"Ref_Key": "ret-1", "СуммаДокумента": 300}]
 NAMES = {CP_ROMASHKA: "ООО Ромашка", CP_LUTIK: "ИП Лютик", CP_OTHER: "АО Прочие"}
 
 
+U_IVAN = "aaaaaaaa-0000-0000-0000-000000000001"
+U_MARIA = "aaaaaaaa-0000-0000-0000-000000000002"
+USERS = {U_IVAN: "Иванов Иван", U_MARIA: "Петрова Мария"}
+
+
+def _task(n, due, performer, *, done=False, title=None):
+    return {
+        "Ref_Key": f"task-{n}",
+        "Number": f"{n:09d}",
+        "Description": title or f"Задача {n}",
+        "СрокИсполнения": due,
+        "Исполнитель_Key": performer,
+        "Executed": done,
+        "DeletionMark": False,
+    }
+
+
+TASKS = [
+    _task(1, "2026-09-28T10:30:00", U_IVAN, title="Позвонить ООО Ромашка"),
+    _task(2, "2026-09-25T00:00:00", U_MARIA, title="Отправить КП"),
+    _task(3, "2026-09-28T00:00:00", U_MARIA, title="Подготовить договор"),
+    _task(4, "2026-09-28T09:00:00", U_IVAN, done=True),  # выполнена
+    _task(5, "2026-09-29T09:00:00", U_IVAN),  # завтра
+    _task(6, "0001-01-01T00:00:00", U_IVAN),  # без срока
+    # незаполненная ссылка в 1C — нулевой GUID
+    _task(7, "2026-09-28T15:00:00", onec.EMPTY_REF, title="Разобрать почту"),
+]
+
+
+def _filter_tasks(params):
+    """Эмулирует фильтр OData, который строит модуль (и проверяет, что он такой)."""
+    if "$filter" not in params:  # проверка доступа (onec.sh check)
+        return TASKS[: int(params.get("$top", len(TASKS)))]
+    flt = params["$filter"]
+    assert flt.startswith("Executed eq false and DeletionMark eq false and ")
+    assert "СрокИсполнения gt datetime'0001-01-01T00:00:00'" in flt
+    limit = flt.split("СрокИсполнения le datetime'")[1].split("'")[0]
+    assert (
+        params["$select"] == "Ref_Key,Number,Description,СрокИсполнения,Исполнитель_Key"
+    )
+    return [
+        t
+        for t in TASKS
+        if not t["Executed"] and onec.EMPTY_DATE < t["СрокИсполнения"] <= limit
+    ]
+
+
 class Fake1C:
     """Минимальный OData-сервер 1C: авторизация, $top/$skip, справочник контрагентов."""
 
     def __init__(self, sales=SALES, returns=RETURNS):
         self.sales, self.returns = sales, returns
         self.requests: list[httpx.Request] = []
+        self.user_lookups = 0
 
     def __call__(self, request: httpx.Request) -> httpx.Response:
         self.requests.append(request)
@@ -66,6 +114,13 @@ class Fake1C:
         if resource.startswith("Catalog_Контрагенты(guid'"):
             key = resource.split("'")[1]
             return httpx.Response(200, json={"Description": NAMES[key]})
+        if resource.startswith("Catalog_Пользователи(guid'"):
+            self.user_lookups += 1
+            return httpx.Response(
+                200, json={"Description": USERS[resource.split("'")[1]]}
+            )
+        if resource == "Task_ЗадачаИсполнителя":
+            return httpx.Response(200, json={"value": _filter_tasks(params)})
         rows = {
             "Document_РеализацияТоваровУслуг": self.sales,
             "Document_ВозвратТоваровОтПокупателя": self.returns,
@@ -259,7 +314,12 @@ def test_configure_tools_enabled(_home):
     onec.configure()
     onec.configure()  # повторно — без дублей
     doc = tomlkit.parse(cfg.read_text())
-    assert list(doc["tools"]["enabled"]) == ["web_search", "file_read", "onec_revenue"]
+    assert list(doc["tools"]["enabled"]) == [
+        "web_search",
+        "file_read",
+        "onec_revenue",
+        "onec_tasks",
+    ]
     assert "# моё" in cfg.read_text()
 
 
@@ -272,7 +332,7 @@ def test_configure_without_tools_section_keeps_defaults(_home):
     enabled = list(
         tomlkit.parse((_home / "config.toml").read_text())["tools"]["enabled"]
     )
-    assert enabled == [*defaults, "onec_revenue"]
+    assert enabled == [*defaults, "onec_revenue", "onec_tasks"]
 
 
 def test_cli_revenue(fake1c, capsys):
@@ -309,3 +369,85 @@ def test_spec_is_valid_json_schema():
     json.dumps(onec.OneCRevenueTool().spec.parameters)  # сериализуется для LLM
     fn = onec.OneCRevenueTool().to_openai_function()
     assert fn["function"]["name"] == "onec_revenue"
+
+
+# --- задачи CRM ---------------------------------------------------------------
+
+DAY = date(2026, 9, 28)
+
+
+def test_tasks_due_today_and_overdue(fake1c):
+    items = onec.tasks_due(DAY)
+    assert [t.title for t in items] == [
+        "Отправить КП",  # просрочена (25.09)
+        "Подготовить договор",  # сегодня, без времени
+        "Позвонить ООО Ромашка",  # сегодня 10:30
+        "Разобрать почту",  # сегодня 15:00, без исполнителя
+    ]
+    assert [t.overdue_on(DAY) for t in items] == [True, False, False, False]
+    assert items[-1].performer == "(не назначен)"
+    assert fake1c.user_lookups == 2  # имя каждого пользователя — один запрос
+
+
+def test_tasks_filter_by_performer(fake1c):
+    items = onec.tasks_due(DAY, performer="петрова")
+    assert {t.performer for t in items} == {"Петрова Мария"}
+    assert len(items) == 2
+
+
+def test_format_tasks(fake1c):
+    text = onec.format_tasks(onec.tasks_due(DAY), DAY)
+    assert text.splitlines()[0] == "Задачи на 28.09.2026: на сегодня 3, просрочено 1."
+    assert "Просрочено:\n  [25.09.2026] Отправить КП №000000002 — Петрова Мария" in text
+    assert "  [в течение дня] Подготовить договор №000000003 — Петрова Мария" in text
+    assert "  [10:30] Позвонить ООО Ромашка №000000001 — Иванов Иван" in text
+    assert "Задача 5" not in text and "Задача 4" not in text and "Задача 6" not in text
+
+
+def test_format_no_tasks():
+    assert onec.format_tasks([], DAY, "Иванов") == (
+        "На 28.09.2026 (Иванов) невыполненных задач нет, просроченных тоже."
+    )
+
+
+def test_tasks_custom_object_missing(fake1c, monkeypatch):
+    monkeypatch.setenv("ONEC_TASK_OBJECT", "Task_ЗадачаCRM")
+    with pytest.raises(onec.OneCError, match="нет объекта Task_ЗадачаCRM"):
+        onec.tasks_due(DAY)
+
+
+def test_tasks_tool(fake1c, monkeypatch):
+    tool = onec.OneCTasksTool()
+    assert tool.to_openai_function()["function"]["name"] == "onec_tasks"
+    result = tool.execute(date="2026-09-28")
+    assert result.success
+    assert result.metadata == {"date": "2026-09-28", "today": 3, "overdue": 1}
+
+    monkeypatch.setattr(onec, "today", lambda: DAY)
+    assert tool.execute().metadata["date"] == "2026-09-28"  # по умолчанию — сегодня
+    assert not tool.execute(date="завтра").success
+
+
+def test_register_both_tools():
+    from openjarvis.core.registry import ToolRegistry
+
+    onec.register()
+    onec.register()
+    assert ToolRegistry.contains("onec_revenue")
+    assert ToolRegistry.contains("onec_tasks")
+
+
+def test_cli_tasks_and_check(fake1c, capsys):
+    assert onec._main(["tasks", "28.09.2026", "--who", "Иванов"]) == 0
+    out = capsys.readouterr().out
+    assert "на сегодня 1, просрочено 0" in out and "Позвонить ООО Ромашка" in out
+
+    assert onec._main(["check"]) == 0
+    out = capsys.readouterr().out
+    assert "Подключение к 1C работает" in out and "Задачи доступны" in out
+
+
+def test_check_without_tasks_object(fake1c, capsys, monkeypatch):
+    monkeypatch.setenv("ONEC_TASK_OBJECT", "Task_Нет")
+    assert onec._main(["check"]) == 0  # выручка работает — это не ошибка
+    assert "Задачи недоступны" in capsys.readouterr().out

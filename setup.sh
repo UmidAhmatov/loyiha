@@ -11,7 +11,7 @@
 #   ./setup.sh --no-rust            # Rust kengaytmasini qurmaslik (xotira funksiyalari o'chadi)
 #   ./setup.sh --dev                # dasturchi paketlari (pytest, ruff, pre-commit)
 #   ./setup.sh --elevenlabs         # ElevenLabs ovozi (API kaliti yashirin holda so'raladi)
-#   ./setup.sh --onec               # 1C: выручка через OData (пароль запрашивается скрыто)
+#   ./setup.sh --onec               # 1C: выручка и задачи CRM через OData (пароль запрашивается скрыто)
 #
 # Muhit o'zgaruvchilari:
 #   OPENJARVIS_DIR       Kod qayerga klonlanadi (standart: shu skript yonidagi ./OpenJarvis)
@@ -237,7 +237,7 @@ if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
     fi
 fi
 
-# 7b. 1C — выручка через OData (onec/ — инструмент onec_revenue для агентов Jarvis)
+# 7b. 1C — выручка и задачи CRM через OData (onec/ — инструменты onec_revenue, onec_tasks)
 ONEC_READY=0
 if [[ "$WITH_ONEC" -eq 1 ]]; then
     info "Подключение 1C..."
@@ -320,7 +320,8 @@ if [[ "$WITH_ELEVENLABS" -eq 1 ]]; then
 fi
 if [[ "$WITH_ONEC" -eq 1 ]]; then
     echo "  $SCRIPT_DIR/onec.sh revenue          # выручка из 1C за текущий месяц"
-    echo "  $SCRIPT_DIR/onec.sh ask \"Какая выручка за сентябрь?\""
+    echo "  $SCRIPT_DIR/onec.sh tasks            # задачи CRM на сегодня и просроченные"
+    echo "  $SCRIPT_DIR/onec.sh ask \"Что у меня на сегодня?\""
     [[ "$ONEC_READY" -eq 1 ]] || warn "1C пока не подключена — ./onec.sh login"
 fi
 if [[ "$WITH_OLLAMA" -eq 1 && "$MODEL_READY" -ne 1 ]]; then

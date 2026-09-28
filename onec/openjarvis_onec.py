@@ -1,8 +1,10 @@
-"""Модуль 1C для OpenJarvis: выручка по документам реализации через OData.
+"""Модуль 1C для OpenJarvis: выручка и задачи CRM через OData.
 
-Добавляет в OpenJarvis инструмент ``onec_revenue``: агент передаёт период,
-модуль сам считает суммы в 1C, поэтому цифры точные (модель ничего не
-складывает). Подключается через ``openjarvis_addon_hook`` (``setup.sh --onec``).
+Добавляет в OpenJarvis инструменты:
+  ``onec_revenue`` — выручка по документам реализации за период. Суммы
+                     считает модуль, поэтому цифры точные (модель ничего не складывает);
+  ``onec_tasks``   — невыполненные задачи со сроком на дату (и просроченные).
+Подключается через ``openjarvis_addon_hook`` (``setup.sh --onec``).
 
 Настройки — ``~/.openjarvis/onec.env`` (права 600):
   ONEC_URL                  http://сервер/база/odata/standard.odata
@@ -13,12 +15,18 @@
   ONEC_COUNTERPARTY_CATALOG Catalog_Контрагенты
   ONEC_RETURN_DOCUMENT      (необязательно) Document_ВозвратТоваровОтПокупателя
   ONEC_CA_BUNDLE            (необязательно) сертификат для https с собственным CA
+  ONEC_TASK_OBJECT          Task_ЗадачаИсполнителя
+  ONEC_TASK_DUE_FIELD       СрокИсполнения
+  ONEC_TASK_DONE_FIELD      Executed
+  ONEC_TASK_PERFORMER_FIELD Исполнитель
+  ONEC_USERS_CATALOG        Catalog_Пользователи
 
 Команды (``python -m openjarvis_onec <команда>``):
   save-credentials          читает из stdin три строки: URL, пользователь, пароль
   check                     проверяет подключение
   revenue [С] [ПО] [--by counterparty|month|day]
-  configure                 добавляет onec_revenue в [tools] enabled
+  tasks [ДАТА] [--who ИМЯ]  задачи на дату (по умолчанию сегодня) и просроченные
+  configure                 добавляет инструменты в [tools] enabled
 """
 
 from __future__ import annotations
@@ -42,6 +50,9 @@ from openjarvis.core.types import ToolResult
 from openjarvis.tools._stubs import BaseTool, ToolSpec
 
 TOOL_NAME = "onec_revenue"
+TASKS_TOOL_NAME = "onec_tasks"
+EMPTY_DATE = "0001-01-01T00:00:00"  # так 1C отдаёт незаполненную дату
+EMPTY_REF = "00000000-0000-0000-0000-000000000000"  # и незаполненную ссылку
 SETTINGS_FILE_NAME = "onec.env"
 PAGE_SIZE = 1000
 GROUPINGS = ("none", "counterparty", "month", "day")
@@ -53,6 +64,11 @@ DEFAULTS = {
     "ONEC_COUNTERPARTY_CATALOG": "Catalog_Контрагенты",
     "ONEC_RETURN_DOCUMENT": "",
     "ONEC_CA_BUNDLE": "",
+    "ONEC_TASK_OBJECT": "Task_ЗадачаИсполнителя",
+    "ONEC_TASK_DUE_FIELD": "СрокИсполнения",
+    "ONEC_TASK_DONE_FIELD": "Executed",
+    "ONEC_TASK_PERFORMER_FIELD": "Исполнитель",
+    "ONEC_USERS_CATALOG": "Catalog_Пользователи",
 }
 
 
@@ -232,7 +248,8 @@ def _period_filter(date_from: date, date_to: date) -> str:
 
 def _group_key(row: dict[str, Any], group_by: str, cp_field: str) -> str:
     if group_by == "counterparty":
-        return row.get(f"{cp_field}_Key", "")
+        key = row.get(f"{cp_field}_Key") or ""
+        return "" if key == EMPTY_REF else key
     day = str(row.get("Date", ""))[:10]
     return day[:7] if group_by == "month" else day
 
@@ -347,7 +364,94 @@ def current_month(today: date | None = None) -> tuple[date, date]:
     return today.replace(day=1), today.replace(day=last)
 
 
-# --- инструмент для агентов Jarvis --------------------------------------------
+# --- задачи CRM ----------------------------------------------------------------
+
+
+@dataclass
+class TaskItem:
+    title: str
+    due: datetime
+    performer: str
+    number: str = ""
+
+    def overdue_on(self, day: date) -> bool:
+        return self.due.date() < day
+
+
+def tasks_due(
+    day: date, *, performer: str = "", settings: dict[str, str] | None = None
+) -> list[TaskItem]:
+    """Невыполненные задачи со сроком не позже ``day`` (просроченные тоже)."""
+    settings = settings or load_settings()
+    client = OneCClient(settings)
+    due, done = settings["ONEC_TASK_DUE_FIELD"], settings["ONEC_TASK_DONE_FIELD"]
+    perf = settings["ONEC_TASK_PERFORMER_FIELD"]
+    rows = client.iter_entities(
+        settings["ONEC_TASK_OBJECT"],
+        filter=(
+            f"{done} eq false and DeletionMark eq false and "
+            f"{due} gt datetime'{EMPTY_DATE}' and "
+            f"{due} le datetime'{day.isoformat()}T23:59:59'"
+        ),
+        select=f"Ref_Key,Number,Description,{due},{perf}_Key",
+    )
+    names: dict[str, str] = {}
+    items = []
+    for row in rows:
+        if str(row.get(due) or EMPTY_DATE).startswith(EMPTY_DATE[:10]):
+            continue  # срок не задан (на случай, если сервер не отфильтровал)
+        key = row.get(f"{perf}_Key") or ""
+        if key == EMPTY_REF:
+            key = ""
+        if key and key not in names:
+            names[key] = client.description(settings["ONEC_USERS_CATALOG"], key)
+        items.append(
+            TaskItem(
+                title=(row.get("Description") or "(без названия)").strip(),
+                due=datetime.fromisoformat(str(row[due])),
+                performer=names.get(key, "(не назначен)"),
+                number=str(row.get("Number") or "").strip(),
+            )
+        )
+    if performer:
+        needle = performer.casefold()
+        items = [t for t in items if needle in t.performer.casefold()]
+    return sorted(items, key=lambda t: (t.due, t.performer, t.title))
+
+
+def format_tasks(items: list[TaskItem], day: date, performer: str = "") -> str:
+    who = f" ({performer})" if performer else ""
+    if not items:
+        return f"На {day:%d.%m.%Y}{who} невыполненных задач нет, просроченных тоже."
+    overdue = [t for t in items if t.overdue_on(day)]
+    today = [t for t in items if not t.overdue_on(day)]
+    lines = [
+        (
+            f"Задачи на {day:%d.%m.%Y}{who}: на сегодня {len(today)}, "
+            f"просрочено {len(overdue)}."
+        )
+    ]
+    for title, group, fmt in (
+        ("Просрочено", overdue, "%d.%m.%Y"),
+        ("На сегодня", today, "%H:%M"),
+    ):
+        if not group:
+            continue
+        lines.append(f"{title}:")
+        for t in group:
+            when = t.due.strftime(fmt)
+            if when == "00:00":
+                when = "в течение дня"
+            number = f" №{t.number}" if t.number else ""
+            lines.append(f"  [{when}] {t.title}{number} — {t.performer}")
+    return "\n".join(lines)
+
+
+def today() -> date:
+    return date.today()  # noqa: DTZ011 — «сегодня» по местному времени
+
+
+# --- инструменты для агентов Jarvis -------------------------------------------
 
 
 class OneCRevenueTool(BaseTool):
@@ -418,14 +522,70 @@ class OneCRevenueTool(BaseTool):
         )
 
 
+class OneCTasksTool(BaseTool):
+    """Задачи из CRM в 1C на дату."""
+
+    tool_id = TASKS_TOOL_NAME
+    is_local = True
+
+    @property
+    def spec(self) -> ToolSpec:
+        return ToolSpec(
+            name=TASKS_TOOL_NAME,
+            description=(
+                "List open (not completed) tasks from the user's 1C CRM that are due "
+                "on a given day, plus overdue ones. Use it for questions like 'what "
+                "are my tasks today', 'задачи на сегодня', 'что просрочено'."
+            ),
+            parameters={
+                "type": "object",
+                "properties": {
+                    "date": {
+                        "type": "string",
+                        "description": "Day YYYY-MM-DD (default: today).",
+                    },
+                    "performer": {
+                        "type": "string",
+                        "description": "Optional: only tasks of this person (part of the name).",
+                    },
+                },
+            },
+            category="crm",
+            timeout_seconds=120.0,
+        )
+
+    def execute(self, **params: Any) -> ToolResult:
+        performer = (params.get("performer") or "").strip()
+        try:
+            day = parse_date(params["date"]) if params.get("date") else today()
+            items = tasks_due(day, performer=performer)
+        except OneCError as exc:
+            return ToolResult(
+                tool_name=TASKS_TOOL_NAME, content=f"Ошибка 1C: {exc}", success=False
+            )
+        return ToolResult(
+            tool_name=TASKS_TOOL_NAME,
+            content=format_tasks(items, day, performer),
+            metadata={
+                "date": day.isoformat(),
+                "today": sum(not t.overdue_on(day) for t in items),
+                "overdue": sum(t.overdue_on(day) for t in items),
+            },
+        )
+
+
+TOOLS = {TOOL_NAME: OneCRevenueTool, TASKS_TOOL_NAME: OneCTasksTool}
+
+
 def register() -> None:
-    """Добавить инструмент в OpenJarvis (повторный вызов безопасен)."""
-    if not ToolRegistry.contains(TOOL_NAME):
-        ToolRegistry.register_value(TOOL_NAME, OneCRevenueTool)
+    """Добавить инструменты в OpenJarvis (повторный вызов безопасен)."""
+    for name, cls in TOOLS.items():
+        if not ToolRegistry.contains(name):
+            ToolRegistry.register_value(name, cls)
 
 
 def configure() -> Path:
-    """Добавить onec_revenue в [tools] enabled, сохранив остальные инструменты."""
+    """Добавить инструменты 1C в [tools] enabled, сохранив остальные."""
     import tomlkit
     from openjarvis.core.config import load_config
 
@@ -437,8 +597,9 @@ def configure() -> Path:
         doc["tools"] = tools
     if "enabled" not in tools:
         tools["enabled"] = list(load_config().tools.enabled or [])
-    if TOOL_NAME not in tools["enabled"]:
-        tools["enabled"].append(TOOL_NAME)
+    for name in TOOLS:
+        if name not in tools["enabled"]:
+            tools["enabled"].append(name)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(tomlkit.dumps(doc))
     return path
@@ -461,10 +622,16 @@ def _main(argv: list[str]) -> int:
         return 0
     if cmd == "check":
         settings = load_settings()
-        OneCClient(settings).get(
-            settings["ONEC_SALES_DOCUMENT"], {"$top": 1, "$select": "Ref_Key"}
-        )
+        client = OneCClient(settings)
+        probe = {"$top": 1, "$select": "Ref_Key"}
+        client.get(settings["ONEC_SALES_DOCUMENT"], probe)
         print(f"Подключение к 1C работает ({settings['ONEC_URL']})")
+        try:
+            client.get(settings["ONEC_TASK_OBJECT"], probe)
+            print(f"Задачи доступны ({settings['ONEC_TASK_OBJECT']})")
+        except OneCError as exc:
+            # выручка работает и без задач — не считаем это ошибкой подключения
+            print(f"Задачи недоступны: {exc}")
         return 0
     if cmd == "revenue":
         group_by = "none"
@@ -477,6 +644,15 @@ def _main(argv: list[str]) -> int:
             date_from = parse_date(args[0])
             date_to = parse_date(args[1]) if len(args) > 1 else date_from
         print(format_report(revenue(date_from, date_to, group_by=group_by)))
+        return 0
+    if cmd == "tasks":
+        performer = ""
+        if "--who" in args:
+            i = args.index("--who")
+            performer = args[i + 1] if i + 1 < len(args) else ""
+            args = args[:i] + args[i + 2 :]
+        day = parse_date(args[0]) if args else today()
+        print(format_tasks(tasks_due(day, performer=performer), day, performer))
         return 0
     print(__doc__, file=sys.stderr)
     return 2

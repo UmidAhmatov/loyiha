@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
-# onec.sh — выручка из 1C (сначала: ./setup.sh --onec).
+# onec.sh — выручка и задачи CRM из 1C (сначала: ./setup.sh --onec).
 #
 #   ./onec.sh login                          # ввести адрес OData, пользователя и пароль 1C
 #   ./onec.sh check                          # проверить подключение
 #   ./onec.sh revenue                        # выручка за текущий месяц
 #   ./onec.sh revenue 01.09.2026 30.09.2026  # за период
 #   ./onec.sh revenue 01.09.2026 30.09.2026 --by counterparty   # по контрагентам (или month, day)
-#   ./onec.sh ask "Какая выручка за сентябрь?"                    # вопрос Jarvis с доступом к 1C
+#   ./onec.sh tasks                          # задачи на сегодня и просроченные
+#   ./onec.sh tasks 29.09.2026 --who Иванов  # на дату, только одного сотрудника
+#   ./onec.sh ask "Что у меня на сегодня?"   # вопрос Jarvis с доступом к 1C
 
 set -euo pipefail
 
@@ -36,10 +38,11 @@ case "${1:-}" in
         ;;
     check) onec check ;;
     revenue) shift; onec revenue "$@" ;;
+    tasks) shift; onec tasks "$@" ;;
     ask)
         shift
         [[ $# -gt 0 ]] || usage
-        exec "$SCRIPT_DIR/jarvis.sh" ask --agent orchestrator --tools onec_revenue "$@"
+        exec "$SCRIPT_DIR/jarvis.sh" ask --agent orchestrator --tools onec_revenue,onec_tasks "$@"
         ;;
     *) usage ;;
 esac
