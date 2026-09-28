@@ -243,9 +243,11 @@ Skriptlar toza Linux muhitida (Python 3.11, Node.js 22.22, uv 0.8) sinab ko'rild
 - OpenJarvis testlari: 8907 ta o'tdi; 3 tasi internet cheklovi tufayli o'tmadi
   (sinov muhitida tashqi saytlar yopiq edi).
 
-Sinov muhitida `ollama.com` va `huggingface.co` yopiq bo'lgani uchun Ollama va
-modelni yuklash qismi o'sha yerda sinalmagan — bu qadamlar rasmiy OpenJarvis
-o'rnatuvchisi bilan bir xil buyruqlardan foydalanadi.
+Sinov muhitida `ollama.com` va `huggingface.co` yopiq edi, shuning uchun Ollama'ni
+haqiqatda yuklab olish va model bilan suhbat u yerda sinalmagan. Skriptlarning
+Ollama bilan ishlash mantig'i (ishga tushirish, modelni yuklash, konfiguratsiyaga
+yozish) soxta Ollama bilan tekshirildi. Buyruqlarning o'zi rasmiy OpenJarvis
+o'rnatuvchisidagi bilan bir xil.
 
 ## Havolalar
 

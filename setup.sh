@@ -92,6 +92,10 @@ info "Python paketlari o'rnatilmoqda (uv sync ${extras[*]})..."
 uv sync "${extras[@]}"
 ok "Python paketlari o'rnatildi: $(uv run jarvis --version)"
 
+# OpenJarvis ma'lumotlar papkasi (OPENJARVIS_HOME > XDG_DATA_HOME/openjarvis > ~/.openjarvis)
+OJ_HOME="$(uv run python -c 'from openjarvis.core.paths import get_config_dir; print(get_config_dir())')"
+mkdir -p "$OJ_HOME"
+
 # 4. Rust kengaytmasi (xotira va xavfsizlik funksiyalari uchun)
 if [[ "$WITH_RUST" -eq 1 ]]; then
     if ! command -v cargo >/dev/null 2>&1; then
@@ -135,10 +139,9 @@ if [[ "$WITH_OLLAMA" -eq 1 ]]; then
         ok "Ollama ishlab turibdi"
     else
         info "Ollama ishga tushirilmoqda..."
-        mkdir -p "$HOME/.openjarvis"
-        nohup ollama serve > "$HOME/.openjarvis/ollama.log" 2>&1 &
+        nohup ollama serve > "$OJ_HOME/ollama.log" 2>&1 &
         for _ in $(seq 1 60); do ollama_up && break; sleep 1; done
-        ollama_up || die "Ollama ishga tushmadi. Log: $HOME/.openjarvis/ollama.log"
+        ollama_up || die "Ollama ishga tushmadi. Log: $OJ_HOME/ollama.log"
         ok "Ollama ishga tushdi"
     fi
 
@@ -153,8 +156,8 @@ else
     warn "--no-ollama: Ollama o'tkazib yuborildi"
 fi
 
-# 6. Konfiguratsiya (~/.openjarvis/config.toml). Mavjud bo'lsa, tegmaymiz.
-CONFIG="${OPENJARVIS_HOME:-$HOME/.openjarvis}/config.toml"
+# 6. Konfiguratsiya (odatda ~/.openjarvis/config.toml). Mavjud bo'lsa, tegmaymiz.
+CONFIG="$OJ_HOME/config.toml"
 if [[ -f "$CONFIG" ]]; then
     ok "Konfiguratsiya allaqachon bor: $CONFIG (o'zgartirilmadi)"
 else
@@ -166,7 +169,18 @@ else
 fi
 
 # 7. Grafik interfeys (`jarvis gui`) uchun Node.js/npm — ixtiyoriy, faqat ogohlantiramiz
-version_ge() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
+# version_ge A B — A >= B bo'lsa 0 qaytaradi (macOS'ning eski `sort` ida -V yo'q)
+version_ge() {
+    local IFS=. i x y
+    local -a a=($1) b=($2)
+    for i in 0 1 2; do
+        x="${a[i]:-0}"; x="${x%%[!0-9]*}"; x="${x:-0}"
+        y="${b[i]:-0}"; y="${y%%[!0-9]*}"; y="${y:-0}"
+        (( 10#$x > 10#$y )) && return 0
+        (( 10#$x < 10#$y )) && return 1
+    done
+    return 0
+}
 GUI_READY=0
 if command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1; then
     node_v="$(node --version | sed 's/^v//')"
